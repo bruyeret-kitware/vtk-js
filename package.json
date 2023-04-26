@@ -160,7 +160,7 @@
     "test:firefox-debug": "karma start ./karma.conf.js --browsers Firefox --no-single-run",
     "commit": "git cz",
     "semantic-release": "semantic-release",
-    "prepare": "node ./Utilities/prepare.js",
+    "prepare": "npm run build:esm && cp -rf ./dist/esm/* ./",
     "patch-build-deps": "patch-package --patch-dir ./Utilities/build/patches"
   },
   "config": {
