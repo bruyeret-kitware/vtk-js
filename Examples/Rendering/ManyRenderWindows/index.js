@@ -61,7 +61,9 @@ async function createActor() {
 }
 
 const mainRenderWindow = vtkRenderWindow.newInstance();
-const mainRenderWindowView = mainRenderWindow.newAPISpecificView();
+const mainRenderWindowView = mainRenderWindow.newAPISpecificView('WebGL', {
+  canvas: new OffscreenCanvas(1, 1),
+});
 mainRenderWindow.addView(mainRenderWindowView);
 
 const rootContainer = document.createElement('div');

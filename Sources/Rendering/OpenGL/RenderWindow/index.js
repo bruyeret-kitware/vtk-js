@@ -147,8 +147,13 @@ function vtkOpenGLRenderWindow(publicAPI, model) {
       ) {
         previousSize[0] = model.size[0];
         previousSize[1] = model.size[1];
-        model.canvas.setAttribute('width', model.size[0]);
-        model.canvas.setAttribute('height', model.size[1]);
+        if ('setAttribute' in model.canvas) {
+          model.canvas.setAttribute('width', model.size[0]);
+          model.canvas.setAttribute('height', model.size[1]);
+        } else {
+          model.canvas.width = model.size[0];
+          model.canvas.height = model.size[1];
+        }
       }
     }
 
@@ -159,7 +164,9 @@ function vtkOpenGLRenderWindow(publicAPI, model) {
     }
 
     // Offscreen ?
-    model.canvas.style.display = model.useOffScreen ? 'none' : 'block';
+    if ('style' in model.canvas) {
+      model.canvas.style.display = model.useOffScreen ? 'none' : 'block';
+    }
 
     // Cursor type
     if (model.el) {
