@@ -6,13 +6,14 @@ import '@kitware/vtk.js/favicon';
 // Load the rendering pieces we want to use (for both WebGL and WebGPU)
 import '@kitware/vtk.js/Rendering/Profiles/Geometry';
 import '@kitware/vtk.js/Rendering/OpenGL/Glyph3DMapper';
+import '@kitware/vtk.js/Rendering/Misc/RenderingAPIs';
+import '@kitware/vtk.js/Rendering/Profiles/Volume';
 
 import { throttle } from '@kitware/vtk.js/macros';
 import vtkActor from '@kitware/vtk.js/Rendering/Core/Actor';
 import vtkConeSource from '@kitware/vtk.js/Filters/Sources/ConeSource';
 import vtkCylinderSource from '@kitware/vtk.js/Filters/Sources/CylinderSource';
 import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray';
-import vtkFullScreenRenderWindow from '@kitware/vtk.js/Rendering/Misc/FullScreenRenderWindow';
 import vtkGlyph3DMapper from '@kitware/vtk.js/Rendering/Core/Glyph3DMapper';
 import vtkMapper from '@kitware/vtk.js/Rendering/Core/Mapper';
 import vtkSphereSource from '@kitware/vtk.js/Filters/Sources/SphereSource';
@@ -23,6 +24,18 @@ import { mat4 } from 'gl-matrix';
 import vtkMath from '@kitware/vtk.js/Common/Core/Math';
 import { FieldAssociations } from '@kitware/vtk.js/Common/DataModel/DataSet/Constants';
 import { Representation } from '@kitware/vtk.js/Rendering/Core/Property/Constants';
+import vtkRenderWindow from '@kitware/vtk.js/Rendering/Core/RenderWindow';
+import vtkRenderer from '@kitware/vtk.js/Rendering/Core/Renderer';
+import vtkRenderWindowInteractor from '@kitware/vtk.js/Rendering/Core/RenderWindowInteractor';
+import vtkInteractorStyleTrackballCamera from '@kitware/vtk.js/Interaction/Style/InteractorStyleTrackballCamera';
+import vtkHttpDataSetReader from '@kitware/vtk.js/IO/Core/HttpDataSetReader';
+import vtkVolume from '@kitware/vtk.js/Rendering/Core/Volume';
+import vtkVolumeMapper from '@kitware/vtk.js/Rendering/Core/VolumeMapper';
+import vtkColorTransferFunction from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction';
+import vtkPiecewiseFunction from '@kitware/vtk.js/Common/DataModel/PiecewiseFunction';
+
+// Force the loading of HttpDataAccessHelper to support gzip decompression
+import '@kitware/vtk.js/IO/Core/DataAccessHelper/HttpDataAccessHelper';
 
 // ----------------------------------------------------------------------------
 // Constants
@@ -53,7 +66,8 @@ tooltipsElem.appendChild(propIdTooltipElem);
 tooltipsElem.appendChild(fieldIdTooltipElem);
 tooltipsElem.appendChild(compositeIdTooltipElem);
 
-document.querySelector('body').appendChild(tooltipsElem);
+document.body.removeChild(document.querySelector('.content'));
+document.body.appendChild(tooltipsElem);
 
 // ----------------------------------------------------------------------------
 // Create 4 objects
@@ -198,47 +212,156 @@ pointerMapper.setInputConnection(pointerSource.getOutputPort());
 // Create rendering infrastructure
 // ----------------------------------------------------------------------------
 
-const fullScreenRenderer = vtkFullScreenRenderWindow.newInstance();
-const renderer = fullScreenRenderer.getRenderer();
-const renderWindow = renderer.getRenderWindow();
-const interactor = renderWindow.getInteractor();
-const apiSpecificRenderWindow = interactor.getView();
+const bodyStyle = document.body.style;
+bodyStyle.height = '100vh';
+bodyStyle.width = '100vw';
+bodyStyle.margin = '0';
+bodyStyle.display = 'flex';
+bodyStyle['justify-content'] = 'space-around';
+bodyStyle['align-items'] = 'center';
+bodyStyle['flex-wrap'] = 'wrap';
 
-renderer.addActor(sphereActor);
-renderer.addActor(cubeActor);
-renderer.addActor(spherePointsActor);
-renderer.addActor(coneActor);
-renderer.addActor(cylinderActor);
-renderer.addActor(pointerActor);
-renderer.addActor(polyLines);
-renderer.addActor(multiPrimitive);
+const background = [0.32, 0.34, 0.43];
 
-renderer.resetCamera();
-renderWindow.render();
+const mainRenderWindow = vtkRenderWindow.newInstance();
+const mainView = mainRenderWindow.newAPISpecificView();
+mainRenderWindow.addView(mainView);
 
-// ----------------------------------------------------------------------------
-// Create hardware selector
-// ----------------------------------------------------------------------------
+function buildChildRenderWindow() {
+  // Create child render window and the corresponding view
+  const renderWindow = vtkRenderWindow.newInstance();
+  mainRenderWindow.addRenderWindow(renderWindow);
+  const view = mainView.addMissingNode(renderWindow);
 
-const hardwareSelector = apiSpecificRenderWindow.getSelector();
-hardwareSelector.setCaptureZValues(true);
-// TODO: bug in FIELD_ASSOCIATION_POINTS mode
-// hardwareSelector.setFieldAssociation(
-//   FieldAssociations.FIELD_ASSOCIATION_POINTS
-// );
-hardwareSelector.setFieldAssociation(FieldAssociations.FIELD_ASSOCIATION_CELLS);
+  // Create container for the new render window
+  const container = document.createElement('div');
+  container.style.height = `50vh`;
+  container.style.width = `50vw`;
+  document.body.appendChild(container);
+  view.setContainer(container);
+
+  // Set size and css style
+  const containerBounds = container.getBoundingClientRect();
+  view.setSize(
+    containerBounds.width * devicePixelRatio,
+    containerBounds.height * devicePixelRatio
+  );
+
+  // Create renderer
+  const renderer = vtkRenderer.newInstance({ background });
+  renderWindow.addRenderer(renderer);
+
+  // Create interactor
+  const interactor = vtkRenderWindowInteractor.newInstance();
+  interactor.setView(view);
+  interactor.initialize();
+  interactor.bindEvents(view.getCanvas());
+  interactor.setInteractorStyle(
+    vtkInteractorStyleTrackballCamera.newInstance()
+  );
+
+  // Create hardware selector
+  const hardwareSelector = view.getSelector();
+  hardwareSelector.setCaptureZValues(true);
+  // TODO: bug in FIELD_ASSOCIATION_POINTS mode
+  // hardwareSelector.setFieldAssociation(
+  //   FieldAssociations.FIELD_ASSOCIATION_POINTS
+  // );
+  hardwareSelector.setFieldAssociation(
+    FieldAssociations.FIELD_ASSOCIATION_CELLS
+  );
+
+  return { renderWindow, view, renderer, interactor, hardwareSelector };
+}
+
+// Initialize the main view before the first "render" that uses a child render windows
+// You can alternatively render using the main render window (will render to all views)
+// We initialize before building the child render windows because the interactor calls "render" on them
+mainView.initialize();
+
+const renderingObjects = [];
+for (let i = 0; i < 64; ++i) {
+  renderingObjects.push(buildChildRenderWindow());
+}
+
+// Resize the context, now that all the windows are set
+mainView.resizeFromChildRenderWindows();
+
+renderingObjects[0].renderer.addActor(sphereActor);
+renderingObjects[0].renderer.addActor(cubeActor);
+renderingObjects[0].renderer.addActor(spherePointsActor);
+renderingObjects[0].renderer.addActor(coneActor);
+renderingObjects[0].renderer.addActor(cylinderActor);
+
+renderingObjects[1].renderer.addActor(polyLines);
+renderingObjects[1].renderer.addActor(multiPrimitive);
+
+renderingObjects.forEach(({ renderer, renderWindow }) => {
+  renderer.addActor(pointerActor);
+  renderer.resetCamera();
+  renderWindow.render();
+});
+
+async function loadVolume() {
+  const actor = vtkVolume.newInstance();
+  const mapper = vtkVolumeMapper.newInstance();
+  mapper.setSampleDistance(0.7);
+  mapper.setVolumetricScatteringBlending(0);
+  mapper.setLocalAmbientOcclusion(0);
+  mapper.setLAOKernelSize(10);
+  mapper.setLAOKernelRadius(5);
+  mapper.setComputeNormalFromOpacity(true);
+  actor.setMapper(mapper);
+
+  const ctfun = vtkColorTransferFunction.newInstance();
+  ctfun.addRGBPoint(0, 0, 0, 0);
+  ctfun.addRGBPoint(95, 1.0, 1.0, 1.0);
+  ctfun.addRGBPoint(225, 0.66, 0.66, 0.5);
+  ctfun.addRGBPoint(255, 0.3, 0.3, 0.5);
+  const ofun = vtkPiecewiseFunction.newInstance();
+  ofun.addPoint(100.0, 0.0);
+  ofun.addPoint(255.0, 1.0);
+  actor.getProperty().setRGBTransferFunction(0, ctfun);
+  actor.getProperty().setScalarOpacity(0, ofun);
+  actor.getProperty().setInterpolationTypeToLinear();
+  actor.getProperty().setShade(true);
+  actor.getProperty().setAmbient(0.3);
+  actor.getProperty().setDiffuse(1);
+  actor.getProperty().setSpecular(1);
+  actor.setScale(0.003, 0.003, 0.003);
+  actor.setPosition(1, 1, -1.1);
+
+  const reader = vtkHttpDataSetReader.newInstance({ fetchGzip: true });
+  await reader.setUrl(`${__BASE_PATH__}/data/volume/LIDC2.vti`);
+  await reader.loadData();
+  const imageData = reader.getOutputData();
+
+  mapper.setInputData(imageData);
+
+  renderingObjects.forEach(({ renderer, renderWindow }) => {
+    renderer.addVolume(actor);
+    renderer.resetCamera();
+    renderWindow.render();
+  });
+}
+
+loadVolume();
 
 // ----------------------------------------------------------------------------
 // Create Mouse listener for picking on mouse move
 // ----------------------------------------------------------------------------
 
-function eventToWindowXY(event) {
+function eventToWindowXY(event, view) {
   // We know we are full screen => window.innerXXX
   // Otherwise we can use pixel device ratio or else...
   const { clientX, clientY } = event;
-  const [width, height] = apiSpecificRenderWindow.getSize();
-  const x = Math.round((width * clientX) / window.innerWidth);
-  const y = Math.round(height * (1 - clientY / window.innerHeight)); // Need to flip Y
+  const canvas = view.getCanvas();
+  const canvasRect = canvas.getBoundingClientRect();
+  const normalizedX = (clientX - canvasRect.left) / canvasRect.width;
+  const normalizedY = (clientY - canvasRect.top) / canvasRect.height;
+  const [width, height] = view.getSize();
+  const x = Math.round(width * normalizedX);
+  const y = Math.round(height * (1 - normalizedY)); // Need to flip Y
   return [x, y];
 }
 
@@ -278,7 +401,7 @@ const updateCompositeAndPropIdTooltip = (compositeID, propID) => {
   }
 };
 
-const updateCursor = (worldPosition) => {
+const updateCursor = (worldPosition, renderWindow) => {
   if (lastProcessedActor) {
     pointerActor.setVisibility(true);
     pointerActor.setPosition(worldPosition);
@@ -289,12 +412,14 @@ const updateCursor = (worldPosition) => {
   updatePositionTooltip(worldPosition);
 };
 
-function processSelections(selections) {
-  renderer.getActors().forEach((a) => a.getProperty().setColor(...WHITE));
+function processSelections(selections, renderingObject) {
+  renderingObject.renderer
+    .getActors()
+    .forEach((a) => a.getProperty().setColor(...WHITE));
   if (!selections || selections.length === 0) {
     lastProcessedActor = null;
     updateAssociationTooltip();
-    updateCursor();
+    updateCursor(undefined, renderingObject.renderWindow);
     updateCompositeAndPropIdTooltip();
     return;
   }
@@ -327,7 +452,7 @@ function processSelections(selections) {
     worldToProp.apply(propPosition);
 
     if (
-      hardwareSelector.getFieldAssociation() ===
+      renderingObject.hardwareSelector.getFieldAssociation() ===
       FieldAssociations.FIELD_ASSOCIATION_POINTS
     ) {
       // Selecting points
@@ -357,7 +482,7 @@ function processSelections(selections) {
   }
   lastProcessedActor = prop;
   // Use closestCellPointWorldPosition or rayHitWorldPosition
-  updateCursor(closestCellPointWorldPosition);
+  updateCursor(closestCellPointWorldPosition, renderingObject.renderWindow);
 
   // Make the picked actor green
   prop.getProperty().setColor(...GREEN);
@@ -373,26 +498,35 @@ function processSelections(selections) {
     scaleArray.fill(0.5);
     cylinderPointSet.modified();
   }
-  renderWindow.render();
+  renderingObject.renderWindow.render();
 }
 
 // ----------------------------------------------------------------------------
 
 function pickOnMouseEvent(event) {
-  if (interactor.isAnimating()) {
+  const renderingObject = renderingObjects.find(({ view }) =>
+    view.getCanvas().matches(':hover')
+  );
+  if (!renderingObject || renderingObject.interactor.isAnimating()) {
     // We should not do picking when interacting with the scene
     return;
   }
-  const [x, y] = eventToWindowXY(event);
+
+  const [x, y] = eventToWindowXY(event, renderingObject.view);
 
   pointerActor.setVisibility(false);
-  hardwareSelector.getSourceDataAsync(renderer, x, y, x, y).then((result) => {
-    if (result) {
-      processSelections(result.generateSelection(x, y, x, y));
-    } else {
-      processSelections(null);
-    }
-  });
+  renderingObject.hardwareSelector
+    .getSourceDataAsync(renderingObject.renderer, x, y, x, y)
+    .then((result) => {
+      if (result) {
+        processSelections(
+          result.generateSelection(x, y, x, y),
+          renderingObject
+        );
+      } else {
+        processSelections(null, renderingObject);
+      }
+    });
 }
 const throttleMouseHandler = throttle(pickOnMouseEvent, 20);
 
